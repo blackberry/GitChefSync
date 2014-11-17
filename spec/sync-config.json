@@ -1,0 +1,13 @@
+{
+	"knife":"/usr/local/bin/knife",
+	"git":"/usr/bin/git",
+	"berks":"/usr/bin/berks",
+	"working_directory":"/tmp/mandolin/sync",
+	"knife_file":"/home/marcus/tmp/.chef/knife.rb",
+	"git_groups": [4085],
+	"git_env_repo": "git@gitlab.rim.net:mand-common/global_chef_env.git",
+	"gitlab_url_type" : "http",
+	"sync_local" : "false",
+	"stage_dir" : "/tmp/staging",
+	"cookbook_repo_list" : ["https://gitlab.rim.net/mand-ems/iems.git"]
+}

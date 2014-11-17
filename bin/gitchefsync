@@ -1,0 +1,18 @@
+#!/usr/bin/env ruby
+
+require 'gitchefsync'
+
+if ARGV.length == 0
+  Gitchefsync.help
+else
+  begin
+    method = Gitchefsync.method( ARGV[0] )
+    #find method opts: stop when encountering arguments --x -y
+    
+    options = Gitchefsync.parseAndConfigure( ARGV )
+    method.call
+  rescue Gitchefsync::ConfigError => e
+    puts e.backtrace
+    Gitchefsync.help        
+  end
+end
