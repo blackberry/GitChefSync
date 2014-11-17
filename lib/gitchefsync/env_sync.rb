@@ -1,9 +1,26 @@
+# Gitchefsync - git to chef sync toolset
+#
+# Copyright 2014, BlackBerry, Inc.
+#
+#Licensed under the Apache License, Version 2.0 (the "License");
+#you may not use this file except in compliance with the License.
+#You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+#Unless required by applicable law or agreed to in writing, software
+#distributed under the License is distributed on an "AS IS" BASIS,
+#WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#See the License for the specific language governing permissions and
+#limitations under the License.
+
 require 'gitchefsync/git_util'
 require 'gitchefsync/errors'
 require 'gitchefsync/io_util'
 require 'gitchefsync/audit'
 require 'gitchefsync/config'
 require 'gitchefsync/common'
+require 'digest'
 
 module Gitchefsync
 
@@ -84,7 +101,9 @@ module Gitchefsync
       @stage_filepath = config['stage_dir']
       @force_upload = config['force_upload']
       @repo_list = repo_list
-      @audit = Audit.new(config['stage_dir'], 'env' )
+      #this is a bit of a hack to determine if we're writing audit
+      @sous = config['sync_local']
+      @audit = Audit.new(config['audit_dir'], 'env' )
       @audit_keep_trim = config['audit_keep_trim']
       @audit_keep_trim ||= 20
       @env_file_list = Array.new()
@@ -92,13 +111,13 @@ module Gitchefsync
       @role_file_list = Array.new()
     end
 
-    def reject_json file
+    def reject_json content
       file_json = nil
       begin
-        json = File.read file
-        file_json = JSON.parse json
+        
+        file_json = JSON.parse content
       rescue Exception => e
-        Gitchefsync.logger.error "event_id=env_parse_error:file=#{file}"
+        Gitchefsync.logger.error "event_id=env_json_parse_error:file=#{file}"
         @audit.addEnv(file,'UPDATE', e )
       end
       file_json
@@ -117,23 +136,23 @@ module Gitchefsync
       Gitchefsync.logger.debug "event_id=json_is_valid:iden=#{iden}:basename=#{f['basename']}"
     end
 
-    def upload_env(f, git_delta)
-      Gitchefsync.logger.debug "event_id=upload_env:filepath=#{f['fullpath']}"
+    def upload_env(f, delta)
+      Gitchefsync.logger.debug "event_id=upload_env:filepath=#{f['fullpath']}:delta=#{delta}"
       begin
         validate_json(f, 'name')
         @env_file_list << f['json']['name']
-        show_out = FS.cmdNoError "#{@knife} environment show #{f['json']['name']}"
-        if show_out.match("ERROR:") || git_delta || @force_upload
+        
+        if delta || @force_upload
           FS.cmd "#{@knife} environment from file #{f['fullpath']} --yes"
           Gitchefsync.logger.info "event_id=environment_uploaded:file_json_name=#{f['json']['name']}:file=#{f['fullpath']}"
-          @audit.addEnv(f['fullpath'],'UPDATE' )
+          @audit.addEnv(f['fullpath'],'UPDATE',nil,f['extra_info'] )
         else
           Gitchefsync.logger.debug "event_id=environment_not_uploaded:file_json_name=#{f['json']['name']}:file=#{f['fullpath']}"
-          @audit.addEnv(f['fullpath'],'EXISTING' )
+          @audit.addEnv(f['fullpath'],'EXISTING',nil,f['extra_info'] )
         end
       rescue ValidationError => e
         Gitchefsync.logger.error("event_id=validation_error:msg=#{e.message}")
-        @audit.addEnv(f['fullpath'],'UPDATE', e )
+        @audit.addEnv(f['fullpath'],'UPDATE', e ,f['extra_info'])
       end
     end
 
@@ -147,45 +166,45 @@ module Gitchefsync
       raise ValidationError, "event_id=invalid_path_to_data_bag_json:path=#{fullpath}"
     end
 
-    def upload_db(f, git_delta)
-      Gitchefsync.logger.debug "event_id=upload_data_bag:filepath=#{f['fullpath']}"
+    def upload_db(f, delta)
+      Gitchefsync.logger.debug "event_id=upload_data_bag:filepath=#{f['fullpath']}:delta=#{delta}"
       db_iden = data_bag_iden(f['fullpath'])
       begin
         validate_json(f, 'id')
         @db_file_list << [db_iden, f['json']['id']]
-        show_out = FS.cmdNoError "#{@knife} data bag show #{db_iden} #{f['json']['id']}"
-        if show_out.match("ERROR:") || git_delta || @force_upload
+        #show_out = FS.cmdNoError "#{@knife} data bag show #{db_iden} #{f['json']['id']}"
+        if delta || @force_upload
           FS.cmd "#{@knife} data bag create #{db_iden}"
           FS.cmd "#{@knife} data bag from file #{db_iden} #{f['fullpath']}"
           Gitchefsync.logger.info "event_id=databag_uploaded:file_json_name=#{f['json']['id']}:file=#{f['fullpath']}"
-          @audit.addEnv(f['fullpath'],'UPDATE' )
+          @audit.addEnv(f['fullpath'],'UPDATE', nil, f['extra_info'] )
         else
           Gitchefsync.logger.debug "event_id=data_bag_not_uploaded:file_json_name=#{f['json']['id']}:file=#{f['fullpath']}"
-          @audit.addEnv(f['fullpath'],'EXISTING')
+          @audit.addEnv(f['fullpath'],'EXISTING', nil, f['extra_info'])
         end
       rescue ValidationError => e
         Gitchefsync.logger.error("event_id=validation_error:msg=#{e.message}")
-        @audit.addEnv(f['fullpath'],'UPDATE', e )
+        @audit.addEnv(f['fullpath'],'UPDATE', e , f['extra_info'])
       end
     end
 
-    def upload_role(f, git_delta)
-      Gitchefsync.logger.debug "event_id=upload_role:fullpath=#{f['fullpath']}"
+    def upload_role(f, delta)
+      Gitchefsync.logger.debug "event_id=upload_role:fullpath=#{f['fullpath']}:delta=#{delta}"
       begin
         validate_json(f, 'name')
         @role_file_list << f['json']['name']
-        show_out = FS.cmdNoError "#{@knife} role show #{f['json']['name']}"
-        if show_out.match("ERROR:") || git_delta || @force_upload
+        
+        if delta || @force_upload
           FS.cmd "#{@knife} role from file #{f['fullpath']} --yes"
           Gitchefsync.logger.info "event_id=role_uploaded:file_json_name=#{f['json']['name']}:file=#{f['fullpath']}"
-          @audit.addEnv(f['fullpath'],'UPDATE' )
+          @audit.addEnv(f['fullpath'],'UPDATE',nil, f['extra_info'] )
         else
           Gitchefsync.logger.debug "event_id=role_not_uploaded:file_json_name=#{f['json']['name']}:file=#{f['fullpath']}"
-          @audit.addEnv(f['fullpath'],'EXISTING' )
+          @audit.addEnv(f['fullpath'],'EXISTING', nil, f['extra_info'] )
         end
       rescue ValidationError => e
         Gitchefsync.logger.error("event_id=validation_error:msg=#{e.message}")
-        @audit.addEnv(f['fullpath'],'UPDATE', e )
+        @audit.addEnv(f['fullpath'],'UPDATE', e , f['extra_info'])
       end
     end
 
@@ -244,13 +263,15 @@ module Gitchefsync
         @audit.add(a)
       end
 
-      #TODO: must create audit for removal
-
-      @audit.write
-      #trim the audit file
-      @audit.trim(@audit_keep_trim)
+     
+      if !@sous
+        @audit.write
+        #trim the audit file
+        @audit.trim(@audit_keep_trim)
+      end 
     end
 
+    
     def update_json_files
       Gitchefsync.logger.info "event_id=update_json_files"
       @env_file_list.clear
@@ -258,25 +279,52 @@ module Gitchefsync
       @db_file_list.clear
       @role_file_list.clear
 
+      #latest audit info for delta purposes
+      begin
+        latest_audit = @audit.latestAuditItems
+        latest_audit ||= Array.new
+        Gitchefsync.logger.info "event_id=audit_file_found:length=#{latest_audit.length}"
+      rescue AuditError => e
+        Gitchefsync.logger.warn "event_id=no_audit_file_found"
+        latest_audit = Array.new
+      end
+     
+      
       @repo_list.each do |repo|
         env_dir = repo.chef_path + "/**/*json"
 
         Dir.glob(env_dir).each  do |file|
 
           file_attr = Hash.new()
-          file_attr['json'] = reject_json(file)
+          content = File.read(file)
+          
+          file_attr['json'] = reject_json(content)
           next if file_attr['json'].nil?
           file_attr['type'] = json_type(file)
           file_attr['filename'] = File.basename(file)
           file_attr['basename'] = File.basename(file).chomp(".json")
           file_attr['fullpath'] = file
-
+          file_attr['extra_info'] = Hash.new
+          #To do comparison we'll hash current
+          file_attr['extra_info']['digest'] = Digest::SHA256.hexdigest content
+          #and compare hash to last audit
+          item = @audit.itemByName(file,latest_audit)
+          delta = true
+          if !item.nil?
+            Gitchefsync.logger.debug "event_id=audit_item_found:name=#{file}:digest=#{file_attr['extra_info']['digest']}"
+            if item.extra_info != nil && file_attr['extra_info']['digest'].eql?(item.extra_info['digest'])
+              Gitchefsync.logger.debug "file_digest=#{item.extra_info['digest']}"
+              delta = false
+            end
+          else
+            Gitchefsync.logger.warn "event_id=no_audit_item_found:name=#{file}"
+          end
           if file_attr['type'].eql? "env"
-            upload_env(file_attr, repo.git_delta)
+            upload_env(file_attr, delta)
           elsif file_attr['type'].eql? "db"
-            upload_db(file_attr, repo.git_delta)
+            upload_db(file_attr, delta)
           elsif file_attr['type'].eql? "role"
-            upload_role(file_attr, repo.git_delta)
+            upload_role(file_attr, delta)
           end
         end
       end

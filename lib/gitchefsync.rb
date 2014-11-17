@@ -1,3 +1,19 @@
+# Gitchefsync - git to chef sync toolset
+#
+# Copyright 2014, BlackBerry, Inc.
+#
+#Licensed under the Apache License, Version 2.0 (the "License");
+#you may not use this file except in compliance with the License.
+#You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+#Unless required by applicable law or agreed to in writing, software
+#distributed under the License is distributed on an "AS IS" BASIS,
+#WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#See the License for the specific language governing permissions and
+#limitations under the License.
+
 require 'optparse'
 require 'gitlab'
 require 'json'
@@ -20,26 +36,26 @@ module Gitchefsync
       
   #A summary of actions and cli options
   def self.help
-    puts "Usage: gitchefsync [operation] -c config_file.json -t gitlab_token [--login=gitlabuser --password=gitlabpassword --syslog]"
-    puts "\tgitchefsync runMasterSync -c config_file.json -t gitlab_token"
-    puts "\tgitchefsync runSousSync -c config_file.json"
-    puts "\tgitchefsync syncCookbooks -c config_file.json -t gitlab_token"
-    puts "\tgitchefsync syncCookbooksLocal -c config_file.json"
-    puts "\tgitchefsync syncEnv -c config_file.json -t gitlab_token"
-    puts "\tgitchefsync stagedUpload -c config_file.json"
-    puts "\tgitchefsync reconcile -c config_file.json -t gitlab_token"
-    puts "\tgitchefsync gitCleanup -c config_file.json -t gitlab_token"
-    puts "\tgitchefsync trimAudit -c config_file.json"
+    puts "Usage: gitchefsync [operation] -c config_file.json -t gitlab_token -u gitlab_url [--login=gitlabuser --password=gitlabpassword --syslog]"
+    puts "\tgitchefsync runMasterSync"
+    puts "\tgitchefsync runSousSync"
+    puts "\tgitchefsync syncCookbooks"
+    puts "\tgitchefsync syncCookbooksLocal"
+    puts "\tgitchefsync syncEnv"
+    puts "\tgitchefsync stagedUpload"
+    puts "\tgitchefsync reconcile"
+    puts "\tgitchefsync gitCleanup"
+    puts "\tgitchefsync trimAudit"
   end
   
   #trims the environment and cookbook audits, keeping @audit_keep_trim
   #number of files
   def self.trimAudit
     logger.debug("event_id=trim_audit_files:keep=#{@audit_keep_trim}")
-    audit = Audit.new(@config['stage_dir'], 'env' )
+    audit = Audit.new(@audit_dir, 'env' )
     audit.trim(@audit_keep_trim)
     
-    audit = Audit.new(@config['stage_dir'], 'cb' )
+    audit = Audit.new(@audit_dir, 'cb' )
     audit.trim(@audit_keep_trim)
     
   end
@@ -48,8 +64,8 @@ module Gitchefsync
     
     notification = Notification.new(@config['smtp_server'])
     
-    notification.notifyFromAudit(@config['stage_dir'], 'cb' )
-    notification.singleNotifyFromAudit(@config['stage_dir'],'env',@config['default_notify_email']) 
+    notification.singleNotifyFromAudit(@audit_dir, 'cb',@config['default_notify_email'] )
+    notification.singleNotifyFromAudit(@audit_dir,'env',@config['default_notify_email']) 
     
     notification.close
   end
@@ -70,6 +86,7 @@ module Gitchefsync
     
     
     FS.knifeReady(@options[:git_local], @options[:knife_config])
+    @knife_ready = true
     
     if !@config['sync_local'] 
      
@@ -163,18 +180,19 @@ module Gitchefsync
     include FS,Git
    
     logger.info "event_id=stage_cookbooks:git_local=#{@git_local}"
-    FS.knifeReady(@options[:git_local], @options[:knife_config])
+    FS.knifeReady(@options[:git_local], @options[:knife_config]) unless @knife_ready
     ret_status = Hash.new
     
     
     #not sure if this should be globally governed?
-    audit = Audit.new(@config['stage_dir'], 'cb')
+    audit = Audit.new(@audit_dir, 'cb')
    
     
     knifeUtil = KnifeUtil.new(@knife, @git_local)
     #Have a delta point: interact with the chef server to identify delta
     listCB = knifeUtil.listCookbooks
-    
+    #list of cookbooks processed
+    list_processed = Array.new
     cookbook_dirs = Dir.entries(@git_local).reject! {|item| item.start_with?(".") }
     cookbook_dirs.each do |dir|
 
@@ -192,7 +210,9 @@ module Gitchefsync
           logger.debug "event_id=git_checkout:path=#{path}:tag=#{tag}"
           Git.cmd "cd #{path} && #{@git_bin} checkout #{tag}"
           
-          self.processCookbook(path,audit)
+          cb = self.processCookbook(path,audit)
+          list_processed << @stage_dir + "/" + cb.berksTar() unless cb.nil?
+          
         rescue NoMetaDataError => e
           #No audit written on failure to parse metadata
           logger.info "event_id=nometadata:dir=#{dir}"
@@ -216,7 +236,17 @@ module Gitchefsync
       end
     end
     
-
+    #compared list_processed with what is in stage
+    #and delete the tars
+    stage = @stage_dir + "/*tar.gz"
+    existing = Dir.glob(stage)
+    to_del = existing - list_processed
+    logger.info "event_id=list_tar_delta:del+list=#{to_del}"
+    to_del.each do |file| 
+      File.delete(file)
+    end
+    #reconcile method will actually delete the cookbooks from server
+     
     #write out the audit file
     audit.write
     #clean the audit files
@@ -232,34 +262,44 @@ module Gitchefsync
     cookbook = knifeUtil.parseMetaData(path)
     logger.debug "event_id=processing:cookbook=#{cookbook}"
     
+    
     if cookbook != nil
       stage_tar = @config['stage_dir'] +"/" + cookbook.berksTar()
       tar_exists = File.exists?(stage_tar)
     end
     
     begin
+      
+      #get some git historical info
+      extra = Hash.new
+      extra['sha'] = (Git.cmd "cd #{path} && git log -1 --pretty=%H").chomp
+      extra['author_email'] = (Git.cmd "cd #{path} && git log -1 --pretty=%ce").chomp
+      extra['date'] = (Git.cmd "cd #{path} && git log -1 --pretty=%cd").chomp
+      extra['subject'] = (Git.cmd "cd #{path} && git log -1 --pretty=%s").chomp
+        
       if  (cookbook !=nil && (!knifeUtil.isCBinList(cookbook, self.serverCookbooks()) || !tar_exists ))
         berks_tar = self.stageBerks(path ,  @config['stage_dir'])
         #upload cookbooks still puts a Berksfile, will refactor this method
         self.uploadBerks(path)
         logger.debug("event_id=staging:cookbook=#{cookbook}:berks_tar=#{berks_tar}")
         self.stageCBUpload(berks_tar, @stage_cb_dir, knifeUtil, self.serverCookbooks())
-        audit.addCookbook(cookbook) if berks_tar.nil?
+        audit.addCookbook(cookbook,"UPDATE",nil,extra) if berks_tar.nil?
         logger.info "event_id=cookbook_staged:cookbook=#{cookbook}"
   
       elsif cookbook !=nil && @config['force_package']
         logger.info "event_id=cookbook_force_package:cookbook=#{cookbook}"
         self.stageBerks(path, @config['stage_dir'])
-      else
-        audit.addCookbook(cookbook, "EXISTING")
+       elsif cookbook != nil
+        audit.addCookbook(cookbook, "EXISTING",nil,extra)
         logger.info "event_id=cookbook_untouched:cookbook=#{cookbook}"
       end
     rescue BerksError => e
       logger.error "event_id=berks_package_failure:msg=#{e.message}:trace=#{e.backtrace}"
-      audit.addCookbook(cookbook, "ERROR", e)
+      audit.addCookbook(cookbook, "ERROR", e,  extra)
     end
     
     Git.cmd "cd #{path} && git clean -xdf"
+    return cookbook
   end
 
   #do a berks upload of the path
@@ -307,7 +347,11 @@ module Gitchefsync
   #returns the path to the berks tar file
   def self.stageBerks(path, stage_dir)
     include FS
+    
     begin
+      if File.exists?(File.join(path,"Berfile.lock"))
+        raise BerksLockError, "Berks lock file found"
+      end
       if File.exists?(File.join(path, "Berksfile"))
         logger.debug "event_id=Stage_cookbook:path=#{path}"
         
@@ -345,7 +389,8 @@ module Gitchefsync
       else
         raise NoBerksError, "Unable to locate Berks file for #{path}"
       end
-    rescue NoBerksError => e 
+    
+    rescue NoBerksError,BerksLockError => e 
       raise e
     rescue Exception => e
       raise BerksError.new(e.message) 
@@ -366,7 +411,7 @@ module Gitchefsync
 
    
     #read in the latest audit - fail on non-null exceptions
-    audit = Audit.new(@config['stage_dir'],'cb' )
+    audit = Audit.new(@audit_dir,'cb' )
      
     json = audit.parseLatest 
     if json != nil && audit.hasError(json)
@@ -409,13 +454,31 @@ module Gitchefsync
         raise InvalidTar, "Invalid tar name #{file}"
       end
 
-      logger.debug "In chef server? #{knifeUtil.inList(match[1],match[2],listCB)}"
+      #logger.debug "In chef server? #{knifeUtil.inList(match[1],match[2],listCB)}"
       
+     
       if !knifeUtil.inList(match[1],match[2],listCB) || forceUpload
         logger.info "event_id=stage_upload:cookbook=#{match[1]}:ver=#{match[2]}:dir=#{cookbook_dir}"
         FS.cmd "tar -xf #{file} -C #{cookbook_dir}"
-        out = FS.cmd "cd #{cookbook_dir} && #{@knife} cookbook upload -a --force --cookbook-path=#{cookbook_dir}/cookbooks"
-        
+        new_cb_list = Array.new       
+        cb_dir = Dir.entries(cookbook_dir + "/cookbooks")
+        cb_dir.each do |dir|
+          
+          begin
+            cb_info = knifeUtil.parseMetaData(cookbook_dir  + "/cookbooks/" + dir)
+            if knifeUtil.inList(cb_info.name(),cb_info.version,listCB)
+              logger.debug "event_id=del_cb_in_server:name=#{cb_info}"
+              FS.cmdNoError "rm -fr #{cookbook_dir}/cookbooks/#{cb_info.name}"
+            else
+              #TODO: add this as a concat method in knife_util class
+               new_cb_list << cb_info
+            end
+          rescue NoMetaDataError => e
+            logger.debug "no metadata on #{dir}"
+          end
+        end
+        out = FS.cmd "cd #{cookbook_dir} && #{@knife} cookbook upload -a --cookbook-path=#{cookbook_dir}/cookbooks"
+        listCB.concat(new_cb_list)
         logger.debug "event_id=stage_upload_output=\n#{out}"
       else
         logger.info"event_id=stage_no_upload:cookbook=#{match[1]}:ver=#{match[2]}"
@@ -453,7 +516,7 @@ module Gitchefsync
   def self.reconcile
 
     #Validation
-    if Audit.new(@config['stage_dir'], 'cb').latest == nil
+    if Audit.new(@audit_dir, 'cb').latest == nil
       logger.warn "event_id=reconcile_no_audit_detected"
       return
     end

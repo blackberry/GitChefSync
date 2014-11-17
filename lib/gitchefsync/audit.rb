@@ -1,3 +1,19 @@
+# Gitchefsync - git to chef sync toolset
+#
+# Copyright 2014, BlackBerry, Inc.
+#
+#Licensed under the Apache License, Version 2.0 (the "License");
+#you may not use this file except in compliance with the License.
+#You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+#Unless required by applicable law or agreed to in writing, software
+#distributed under the License is distributed on an "AS IS" BASIS,
+#WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#See the License for the specific language governing permissions and
+#limitations under the License.
+
 require 'json'
 require 'gitchefsync/config'
 require 'gitchefsync/io_util'
@@ -15,7 +31,7 @@ module Gitchefsync
 
     #adds an audit item
     def add ( item )
-      @list << item.to_hash
+      @list << item
     end
 
     def addItem(name, version)
@@ -23,16 +39,16 @@ module Gitchefsync
       add(item)
     end
 
-    def addCookbook(cookbook,action="UPDATE",exception=nil)
-      item = AuditItem.new(cookbook.name,cookbook.version,exception,action)
+    def addCookbook(cookbook,action="UPDATE",exception=nil, extra_info = nil)
+      item = AuditItem.new(cookbook.name,cookbook.version,exception,action,extra_info)
       item.setCookbook(cookbook)
       add(item)
     end
 
     #This gives enough information
-    def addEnv(name,action='UPDATE',exception=nil)
+    def addEnv(name,action='UPDATE',exception=nil, extra_info=nil)
       cb = Cookbook.new(name,'','mandolin','mandolin@blackberry.com')
-      addCookbook(cb,action,exception)
+      addCookbook(cb,action,exception,extra_info)
     end
 
     #writes the audit out
@@ -40,12 +56,27 @@ module Gitchefsync
     #and an audit-type-timestamp.json
     def write
       begin
+        unless File.exists? @fileLocation
+          FS.cmd "mkdir -p #{@fileLocation}"
+        end
         fileLoc = @fileLocation + "/audit-" +@type+ @ts.to_s + ".json"
         #fileCurrent = @fileLocation + "/audit-" +@type+ "-current" + ".json"
         if @list.length > 0
           Gitchefsync.logger.debug "event_id=write_audit:file_loc=#{fileLoc}"
           file = File.open(fileLoc, "w")
-          json = JSON.generate(@list)
+          list_hash = Array.new
+          @list.each do |item|
+            list_hash << item.to_hash
+          end
+          audit_hash = Hash.new
+          host_info['host_ip'] = FS.cmd "hostname -I"
+          audit_hash['host_source'] = FS.cmd "hostname -f"
+          audit_hash['date'] = Time.now
+          #time taken from time of start of audit process -construction, until it's writing (now)
+          audit_hash['audit_written_secs'] = Time.now.to_i - @ts
+          audit_hash['num_items'] = list_hash.length()
+          audit_hash['items'] = list_hash
+          json = JSON.generate(audit_hash)
           file.write(json)
           #create sym link to this file
           latest = @fileLocation+ "/audit_" + @type + "_latest.json"
@@ -65,11 +96,24 @@ module Gitchefsync
 
     #returns the latest audit file
     def latest
+      latest = @fileLocation+ "/audit_" + @type + "_latest.json"
+      if File.exists? latest
+        return latest
+      end            
+      file = fileFrom(-1)
+      file
+    end
+    
+    #returns the file from the latest:-1, next:-2 and so on
+    #returning nil if nothing found
+    def fileFrom(index)
       entries = Dir.glob(@fileLocation + "/audit-#{@type}*")
       file = nil
-      if entries != nil
-        file = entries.sort[entries.length-1]
+     
+      if entries != nil && (entries.length >= -index) 
+        file = entries.sort[entries.length + index]
       end
+      
       file
     end
 
@@ -131,23 +175,74 @@ module Gitchefsync
       end
       json
     end
-
-    def latestAuditItems
-      json = parseLatest
+    
+    #get audit hash from the 
+    #
+    def auditItems(index)
+      file = fileFrom(index)
+      audit_list = Array.new
+      
+      if !file.nil?
+        json = JSON.parse(File.read(file))
+      end
       if json.nil?
-        raise AuditError, "No json available"
+        return nil
       end
       audit_list = Array.new
-      json.each do |audit_item|
+      #keep backward compatibility
+      if json.kind_of?(Array)
+        items = json
+      else
+        items = json['items']
+      end
+      items.each do |audit_item|
         audit_list << AuditItem.new(nil,nil).from_hash(audit_item)
       end
       audit_list
+            
     end
-
+    
+    def latestAuditItems
+      auditItems(-1)
+    end
+    
+    #finds the audit item by audit item name - to be used with a 
+    #method latestAuditItems (above)
+    #@param name - the name of the item
+    #@param audit - an array of audit items
+    def itemByName(name, audit)
+      ret = nil
+      audit.each do |item|
+        
+        if item.name.eql? name
+          ret = item
+          break
+        end 
+      end
+      ret
+    end
+    def itemByNameVersion(name,version, audit)
+      ret = nil
+      audit.each do |item|
+        
+        if item.name.eql?(name) && item.version.eql?(version)
+          ret = item
+          break
+        end 
+      end
+      ret
+    end
     #if the json has exceptions
     def hasError (json_obj)
       ret = false
-      json_obj.each do |item|
+      #keep backward compatibility
+      if json_obj.kind_of?(Array)
+        items = json_obj
+      else
+        items = json_obj['items']
+      end
+   
+      items.each do |item|
         if item['exception'] != nil then ret = true end
       end
       ret
@@ -158,16 +253,20 @@ module Gitchefsync
   #TODO: just reference Cookbook clas in knife_util
   class AuditItem
 
-    def initialize(name, version, exception = nil, action = 'UPDATE', ts = Time.now)
+    def initialize(name, version, exception = nil, action = 'UPDATE', extra_info = nil, ts = Time.now)
       @name = name
       @version = version
       @ts = ts.to_i
       @exception = exception
       @action = action
+      @extra_info = extra_info
     end
 
     def name
       @name
+    end
+    def version
+      @version
     end
     def ex
       @exception
@@ -187,6 +286,12 @@ module Gitchefsync
       @action = action
     end
 
+    def extra_info
+      @extra_info 
+    end
+    def set_extra_info hash
+      @extra_info = hash
+    end
     #this method doesn't work when called when exception is created from json (from_hash)
     def to_hash
       h = Hash.new
@@ -202,6 +307,7 @@ module Gitchefsync
       h[:action] = @action unless @action == nil
       h[:maintainer] = @cookbook.maintainer unless @cookbook == nil
       h[:maintainer_email] = @cookbook.maintainer_email unless @cookbook == nil
+      h[:extra_info] = @extra_info unless @extra_info == nil
       h
     end
 
@@ -213,6 +319,7 @@ module Gitchefsync
       @type = h['type']
       @action = h['action']
       @cookbook = Cookbook.new(@name,@version,h['maintainer'],h['maintainer_email'])
+      @extra_info = h['extra_info']
       return self
     end
   end
