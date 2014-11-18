@@ -64,6 +64,7 @@ module Gitchefsync
     #MAND-791 skip private repositories
     if !project['public']
       logger.warn "event_id=private_project_detected:project=#{project['path_with_namespace']}"
+      return
     end
     p_name = project['path_with_namespace'].split('/').join('_')
     project_path = File.join(@git_local, p_name)

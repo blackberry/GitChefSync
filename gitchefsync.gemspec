@@ -36,7 +36,7 @@ Gem::Specification.new do |spec|
   #spec.add_runtime_dependency 'chef'
   #spec.add_runtime_dependency 'berkshelf'
   spec.add_runtime_dependency "gitlab", '~> 3.0.0'
-  spec.add_development_dependency "bundler", "~> 1.6"
+  spec.add_development_dependency "bundler"
   spec.add_development_dependency "rake"
   spec.homepage = "https://github.com/blackberry/GitChefSync"
 

@@ -69,8 +69,8 @@ module Gitchefsync
             list_hash << item.to_hash
           end
           audit_hash = Hash.new
-          host_info['host_ip'] = FS.cmd "hostname -I"
-          audit_hash['host_source'] = FS.cmd "hostname -f"
+          audit_hash['host_ip'] = (FS.cmd "hostname -I").strip
+          audit_hash['host_source'] = (FS.cmd "hostname -f").strip
           audit_hash['date'] = Time.now
           #time taken from time of start of audit process -construction, until it's writing (now)
           audit_hash['audit_written_secs'] = Time.now.to_i - @ts
@@ -183,7 +183,11 @@ module Gitchefsync
       audit_list = Array.new
       
       if !file.nil?
-        json = JSON.parse(File.read(file))
+        begin
+          json = JSON.parse(File.read(file))
+        rescue Exception => e
+          Gitchefsync.logger.error "event_id=json_unparseable:file=#{file}"
+        end 
       end
       if json.nil?
         return nil

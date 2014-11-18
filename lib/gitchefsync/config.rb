@@ -20,6 +20,7 @@ require 'logger'
 #require 'syslog/logger'
 require 'syslog'
 require 'gitchefsync/log'
+require 'gitlab'
 
 #Central point of configuration
 module Gitchefsync
@@ -36,6 +37,7 @@ module Gitchefsync
     def configure(options)
       
       @options = options
+      Gitlab.endpoint = options[:gitlab_url]
       config = options[:config]
       @git_bin = config['git']
       @berks = config['berks']
